@@ -137,6 +137,8 @@ import Layout from '../layouts/Layout.astro';
 			<div id="vignette"></div>
 			<div id="panic-vignette"></div>
 			<div id="static"></div>
+			<div id="grade"></div>
+			<div id="film-grain"></div>
 			<div id="glow-flare"></div>
 
 			<div id="hud-survivor" class="hud">
@@ -1086,6 +1088,43 @@ import Layout from '../layouts/Layout.astro';
 
 	#match.shaken #static {
 		opacity: 0.2;
+	}
+
+	#grade,
+	#film-grain {
+		position: absolute;
+		pointer-events: none;
+	}
+
+	/* colour grade: cold shadows, warm practical light */
+	#grade {
+		inset: 0;
+		mix-blend-mode: soft-light;
+		opacity: 0.9;
+		background: linear-gradient(
+			180deg,
+			rgba(38, 74, 108, 0.42) 0%,
+			rgba(0, 0, 0, 0) 46%,
+			rgba(96, 58, 22, 0.3) 100%
+		);
+	}
+
+	/* real sensor noise over the frame */
+	#film-grain {
+		inset: -60%;
+		opacity: 0.09;
+		mix-blend-mode: overlay;
+		background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+		background-size: 180px 180px;
+		animation: filmGrain 0.7s steps(4) infinite;
+	}
+
+	@keyframes filmGrain {
+		0% { transform: translate3d(0, 0, 0); }
+		25% { transform: translate3d(-3%, 2%, 0); }
+		50% { transform: translate3d(2%, -3%, 0); }
+		75% { transform: translate3d(-2%, -2%, 0); }
+		100% { transform: translate3d(0, 0, 0); }
 	}
 
 	#match.low-sanity #static {

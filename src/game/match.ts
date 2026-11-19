@@ -183,6 +183,8 @@ export class Match {
 		this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 		this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
 		this.renderer.toneMappingExposure = 1.22;
+		this.renderer.shadowMap.enabled = true;
+		this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 		this.scene = new THREE.Scene();
 		this.scene.fog = new THREE.FogExp2(cfg.map.palette.fog, cfg.map.palette.fogDensity);
@@ -221,8 +223,60 @@ export class Match {
 		this.flashlight = new THREE.SpotLight(0xffe6bd, 68, 34, 0.6, 0.62, 1.35);
 		this.flashlight.position.set(0.18, -0.1, 0);
 		this.flashlight.target.position.set(0, -0.1, -1);
+		this.flashlight.castShadow = true;
+		this.flashlight.shadow.mapSize.set(1024, 1024);
+		this.flashlight.shadow.camera.near = 0.35;
+		this.flashlight.shadow.camera.far = 32;
+		this.flashlight.shadow.bias = -0.0012;
+		this.flashlight.shadow.normalBias = 0.03;
 		this.camera.add(this.flashlight);
 		this.camera.add(this.flashlight.target);
+
+		// Volumetric haze cone: the beam becomes visible in dusty air.
+		const beamLen = 21;
+		const beamRadius = 6.2;
+		const beamGeo = new THREE.ConeGeometry(beamRadius, beamLen, 26, 1, true);
+		beamGeo.translate(0, -beamLen / 2, 0);
+		beamGeo.rotateX(Math.PI / 2);
+		const beamMat = new THREE.ShaderMaterial({
+			uniforms: {
+				uColor: { value: new THREE.Color(0xffe6bd) },
+				uOpacity: { value: 0.05 },
+				uLen: { value: beamLen },
+				uRadius: { value: beamRadius },
+			},
+			vertexShader: /* glsl */ `
+				varying vec3 vLocal;
+				void main() {
+					vLocal = position;
+					gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+				}
+			`,
+			fragmentShader: /* glsl */ `
+				uniform vec3 uColor;
+				uniform float uOpacity;
+				uniform float uLen;
+				uniform float uRadius;
+				varying vec3 vLocal;
+				void main() {
+					float d = clamp(-vLocal.z / uLen, 0.0, 1.0);
+					float radial = length(vLocal.xy) / max(0.001, uRadius * d);
+					float edge = 1.0 - smoothstep(0.3, 1.0, radial);
+					float falloff = pow(1.0 - d, 1.6) * smoothstep(0.0, 0.07, d);
+					gl_FragColor = vec4(uColor, edge * falloff * uOpacity);
+				}
+			`,
+			transparent: true,
+			blending: THREE.AdditiveBlending,
+			depthWrite: false,
+			depthTest: true,
+			side: THREE.DoubleSide,
+		});
+		const beam = new THREE.Mesh(beamGeo, beamMat);
+		beam.renderOrder = 3;
+		beam.frustumCulled = false;
+		this.camera.add(beam);
+		this.camera.userData.beam = beam;
 
 		const nearLight = new THREE.PointLight(0xbcd0e0, 1.1, 8, 2);
 		nearLight.position.set(0, 0, 0);
@@ -346,6 +400,12 @@ export class Match {
 			limbs[side < 0 ? 'leftLeg' : 'rightLeg'] = leg;
 		}
 		this.monsterParts = limbs;
+		g.traverse((child) => {
+			if (child instanceof THREE.Mesh) {
+				child.castShadow = true;
+				child.receiveShadow = true;
+			}
+		});
 		return g;
 	}
 
@@ -439,6 +499,12 @@ export class Match {
 		pack.position.set(0, 1.08, 0.22);
 		g.add(pack);
 		g.position.set(s.x, 0, s.z);
+		g.traverse((child) => {
+			if (child instanceof THREE.Mesh) {
+				child.castShadow = true;
+				child.receiveShadow = true;
+			}
+		});
 		this.scene.add(g);
 		return g;
 	}
@@ -1461,22 +1527,43 @@ export class Match {
 	}
 
 	private updateCamera(dt: number) {
+		let swayX = 0;
+		let swayY = 0;
+		let swayPitch = 0;
 		if (this.player) {
 			const p = this.player;
 			const eye = p.crouch ? 1.02 : 1.66;
 			this.bob += (p.sprint ? 12 : 8) * dt * (p.sprint ? 1.4 : 1);
 			const bobY = Math.sin(this.bob) * (p.sprint ? 0.045 : 0.022);
-			this.camera.position.set(p.x, eye + bobY, p.z);
+			// A held camera is never perfectly still, and worse when out of breath.
+			const strain = 1 - p.breath / 100;
+			const amp = 0.007 + strain * 0.013 + p.panic * 0.008;
+			swayX = Math.sin(this.elapsed * 0.83) * amp + Math.sin(this.elapsed * 2.3) * amp * 0.22;
+			swayY = Math.cos(this.elapsed * 1.17) * amp * 0.65;
+			swayPitch = Math.cos(this.elapsed * 1.17) * amp * 0.5;
+			this.camera.position.set(p.x + swayX, eye + bobY + swayY, p.z);
 		} else if (this.monsterPlayer) {
 			this.camera.position.set(this.monsterPlayer.x, 2.1, this.monsterPlayer.z);
 		}
 		this.camera.rotation.set(
-			this.pitch + (Math.random() - 0.5) * this.shake * 0.05,
+			this.pitch + swayPitch + (Math.random() - 0.5) * this.shake * 0.05,
 			this.yaw + (Math.random() - 0.5) * this.shake * 0.05,
 			Math.sin(this.elapsed * 0.6) * 0.004 + (Math.random() - 0.5) * this.shake * 0.03,
 			'YXZ',
 		);
+		// Sprinting widens the lens a touch, like a real handheld camera.
+		const targetFov = this.player?.sprint ? 79 : 74;
+		if (Math.abs(this.camera.fov - targetFov) > 0.01) {
+			this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 5);
+			this.camera.updateProjectionMatrix();
+		}
 		this.flashlight.visible = !this.cfg.youAreMonster && !!this.player?.flashlight;
+		const beam = this.camera.userData.beam as THREE.Mesh | undefined;
+		if (beam) {
+			beam.visible = this.flashlight.visible;
+			const beamMat = beam.material as THREE.ShaderMaterial;
+			beamMat.uniforms.uOpacity.value = 0.05 * (this.flashlight.intensity / 68);
+		}
 	}
 
 	private updateSonarFrame(dt: number) {

@@ -56,7 +56,7 @@ const texCache = new Map<string, THREE.CanvasTexture>();
 function surfaceTexture(kind: string): THREE.CanvasTexture {
 	const cached = texCache.get(kind);
 	if (cached) return cached;
-	const size = 128;
+	const size = 256;
 	const canvas = document.createElement('canvas');
 	canvas.width = canvas.height = size;
 	const g = canvas.getContext('2d')!;
@@ -64,7 +64,7 @@ function surfaceTexture(kind: string): THREE.CanvasTexture {
 	g.fillRect(0, 0, size, size);
 
 	// universal grime
-	for (let i = 0; i < 2200; i++) {
+	for (let i = 0; i < 6000; i++) {
 		const v = 110 + Math.floor(Math.random() * 120);
 		g.fillStyle = `rgba(${v},${v},${v},${0.04 + Math.random() * 0.14})`;
 		const s = 1 + Math.random() * 2.4;
@@ -158,7 +158,7 @@ function surfaceTexture(kind: string): THREE.CanvasTexture {
 	const tex = new THREE.CanvasTexture(canvas);
 	tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
 	tex.colorSpace = THREE.SRGBColorSpace;
-	tex.anisotropy = 4;
+	tex.anisotropy = 8;
 	texCache.set(kind, tex);
 	return tex;
 }
@@ -656,6 +656,12 @@ export function buildWorld(def: MapDef, seedOffset = 0): BuiltWorld {
 				const { obj, footprint } = buildProp(spec.type, rng);
 				obj.position.set(wx, 0, wz);
 				obj.rotation.y = rng() * Math.PI * 2;
+				obj.traverse((child) => {
+					if (child instanceof THREE.Mesh) {
+						child.castShadow = true;
+						child.receiveShadow = true;
+					}
+				});
 				propGroups.push(obj);
 				placed.push({ x: wx, z: wz });
 				if (spec.type !== 'chime' && spec.type !== 'pipe') {
@@ -697,6 +703,8 @@ export function buildWorld(def: MapDef, seedOffset = 0): BuiltWorld {
 		const material = new THREE.MeshStandardMaterial({
 			color: info.color,
 			map: surfaceTexture(SURFACE_IDS[s]),
+			bumpMap: surfaceTexture(SURFACE_IDS[s]),
+			bumpScale: SURFACE_IDS[s] === 'water' ? 0.006 : 0.03,
 			roughness: info.rough,
 			metalness: info.metal,
 			transparent: SURFACE_IDS[s] === 'water',
@@ -717,6 +725,7 @@ export function buildWorld(def: MapDef, seedOffset = 0): BuiltWorld {
 		});
 		mesh.instanceMatrix.needsUpdate = true;
 		if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+		mesh.receiveShadow = true;
 		group.add(mesh);
 	}
 
@@ -738,6 +747,8 @@ export function buildWorld(def: MapDef, seedOffset = 0): BuiltWorld {
 	const wallMaterial = new THREE.MeshStandardMaterial({
 		color: def.palette.wall,
 		map: surfaceTexture('concrete'),
+		bumpMap: surfaceTexture('concrete'),
+		bumpScale: 0.05,
 		roughness: 0.94,
 		metalness: 0.04,
 	});
@@ -757,7 +768,29 @@ export function buildWorld(def: MapDef, seedOffset = 0): BuiltWorld {
 	});
 	walls.instanceMatrix.needsUpdate = true;
 	if (walls.instanceColor) walls.instanceColor.needsUpdate = true;
+	walls.receiveShadow = true;
 	group.add(walls);
+
+	// Skirting board: a real building has one, and it catches the flashlight.
+	const trimMat = new THREE.MeshStandardMaterial({
+		color: def.palette.wallTrim,
+		roughness: 0.78,
+		metalness: 0.1,
+	});
+	patchSonar(trimMat);
+	const trim = new THREE.InstancedMesh(new THREE.BoxGeometry(1.03, 0.16, 1.03), trimMat, wallCells.length);
+	wallCells.forEach((i, n) => {
+		const x = i % GRID;
+		const z = Math.floor(i / GRID);
+		dummy.position.set(cellCenter(x), 0.08, cellCenter(z));
+		dummy.rotation.set(0, 0, 0);
+		dummy.scale.set(1, 1, 1);
+		dummy.updateMatrix();
+		trim.setMatrixAt(n, dummy.matrix);
+	});
+	trim.instanceMatrix.needsUpdate = true;
+	trim.receiveShadow = true;
+	group.add(trim);
 
 	// Ceiling for indoor maps
 	if (def.indoor) {
@@ -772,6 +805,61 @@ export function buildWorld(def: MapDef, seedOffset = 0): BuiltWorld {
 		ceiling.rotation.x = Math.PI / 2;
 		ceiling.position.y = 3.5;
 		group.add(ceiling);
+
+		// Exposed structural beams give the ceiling real parallax.
+		const beamMat = new THREE.MeshStandardMaterial({
+			color: 0x26282a,
+			roughness: 0.85,
+			metalness: 0.12,
+		});
+		patchSonar(beamMat);
+		const beamCount = Math.floor(GRID / 4);
+		const beams = new THREE.InstancedMesh(new THREE.BoxGeometry(GRID, 0.26, 0.34), beamMat, beamCount);
+		for (let i = 0; i < beamCount; i++) {
+			dummy.position.set(0, 3.36, -GRID / 2 + 2 + i * 4);
+			dummy.rotation.set(0, 0, 0);
+			dummy.scale.set(1, 1, 1);
+			dummy.updateMatrix();
+			beams.setMatrixAt(i, dummy.matrix);
+		}
+		beams.instanceMatrix.needsUpdate = true;
+		beams.receiveShadow = true;
+		group.add(beams);
+	}
+
+	// Standing puddles on wet maps — sharp specular glints from the flashlight.
+	if (def.weather === 'rain') {
+		const open: number[] = [];
+		for (let z = 1; z < GRID - 1; z++)
+			for (let x = 1; x < GRID - 1; x++) if (grid[idx(x, z)] === 0) open.push(idx(x, z));
+		const puddleMat = new THREE.MeshStandardMaterial({
+			color: 0x0b141b,
+			roughness: 0.07,
+			metalness: 0.9,
+			transparent: true,
+			opacity: 0.85,
+			polygonOffset: true,
+			polygonOffsetFactor: -1,
+		});
+		patchSonar(puddleMat);
+		const disc = new THREE.CircleGeometry(1, 16);
+		disc.rotateX(-Math.PI / 2);
+		const count = Math.min(48, open.length);
+		const puddles = new THREE.InstancedMesh(disc, puddleMat, count);
+		for (let i = 0; i < count; i++) {
+			const cell = open[Math.floor(rng() * open.length)];
+			const x = cell % GRID;
+			const z = Math.floor(cell / GRID);
+			dummy.position.set(cellCenter(x) + (rng() - 0.5) * 0.5, 0.013, cellCenter(z) + (rng() - 0.5) * 0.5);
+			dummy.rotation.set(0, rng() * Math.PI, 0);
+			dummy.scale.set(0.3 + rng() * 0.5, 1, 0.25 + rng() * 0.5);
+			dummy.updateMatrix();
+			puddles.setMatrixAt(i, dummy.matrix);
+		}
+		puddles.instanceMatrix.needsUpdate = true;
+		puddles.receiveShadow = true;
+		group.add(puddles);
+		dummy.scale.set(1, 1, 1);
 	}
 
 	// Debris on glass / cans
